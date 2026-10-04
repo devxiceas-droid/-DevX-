@@ -2059,7 +2059,7 @@
         attachHoverEvents();
 
         // ---------------------------------------------------------
-        // 1. NEON DATABASE WRAPPER (Replaces LocalStorage)
+        // 1. NEON DATABASE WRAPPER (Data API + Better Auth flow)
         // ---------------------------------------------------------
         const NeonDatabase = {
             API_URL: 'https://ep-fragrant-wind-b14go6t8.apirest.c-5.eu-central-1.aws.neon.tech/neondb/rest/v1',
@@ -2078,75 +2078,110 @@
                 try {
                     const res = await fetch(url, { ...options, headers: { ...this.getHeaders(), ...options.headers } });
                     if (!res.ok) {
-                        const err = await res.json().catch(() => ({}));
-                        throw new Error(err.message || err.error_description || err.error || `Database Error: ${res.status}`);
+                        const errText = await res.text();
+                        let errMsg = `Database Error: ${res.status} - ${errText}`;
+                        try {
+                            const errObj = JSON.parse(errText);
+                            errMsg = errObj.message || errObj.error_description || errObj.error || errObj.code || errMsg;
+                        } catch (e) {
+                            // Leave as text if JSON parsing fails
+                        }
+                        throw new Error(errMsg);
                     }
                     if (res.status === 204) return null;
-                    return await res.json();
+                    const text = await res.text();
+                    return text ? JSON.parse(text) : null;
                 } catch (error) {
-                    console.warn(`[Neon DB]: ${error.message}`);
+                    console.warn(`[Neon API Request Failed]: ${error.message}`);
                     throw error;
                 }
             },
 
             // --- AUTH & USERS ---
             async login(identifier, usn, password) {
-                // Login via Auth token endpoint
-                const authRes = await this.request(`${this.AUTH_URL}/token?grant_type=password`, {
+                // Login via Auth endpoint (Better Auth sign-in format)
+                const authRes = await this.request(`${this.AUTH_URL}/sign-in/email`, {
                     method: 'POST',
                     body: JSON.stringify({ email: identifier, password })
                 });
 
-                // Fetch Profile from Neon DB users table
+                const token = authRes.token || authRes.access_token || authRes.session?.token;
                 const userId = authRes.user?.id;
+
+                if (!token) {
+                    throw new Error("Authentication failed: No valid token received from auth provider.");
+                }
+
                 let profileData = [];
+                // Use the newly acquired token in the header to fetch user DB info
                 if (userId) {
-                    profileData = await this.request(`/users?id=eq.${userId}&select=*`).catch(() => []);
+                    profileData = await this.request(`/users?id=eq.${userId}&select=*`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).catch(() => []);
                 } else {
-                    profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`).catch(() => []);
+                    profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).catch(() => []);
                 }
 
                 if (!profileData || profileData.length === 0) {
-                    throw new Error("Profile registered but not synchronized correctly. Please contact an admin.");
+                    throw new Error("Profile registered but not synchronized in the database. Ensure database setup is correct.");
                 }
 
                 if (usn && profileData[0].usn !== usn) {
                     throw new Error("Invalid USN provided.");
                 }
 
-                return { ...profileData[0], access_token: authRes.access_token };
+                return { ...profileData[0], access_token: token };
             },
 
             async devLogin(identifier, password) {
-                const authRes = await this.request(`${this.AUTH_URL}/token?grant_type=password`, {
+                const authRes = await this.request(`${this.AUTH_URL}/sign-in/email`, {
                     method: 'POST',
                     body: JSON.stringify({ email: identifier, password })
                 });
 
+                const token = authRes.token || authRes.access_token || authRes.session?.token;
                 const userId = authRes.user?.id;
+                
+                if (!token) {
+                    throw new Error("Authentication failed: No valid token received.");
+                }
+
                 let profileData = [];
                 if (userId) {
-                    profileData = await this.request(`/users?id=eq.${userId}&select=*`).catch(() => []);
+                    profileData = await this.request(`/users?id=eq.${userId}&select=*`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).catch(() => []);
                 } else {
-                    profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`).catch(() => []);
+                    profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).catch(() => []);
                 }
 
                 if (!profileData || profileData.length === 0 || profileData[0].role !== 'developer') {
-                    throw new Error("Invalid developer credentials.");
+                    throw new Error("Invalid developer credentials or inadequate permission role.");
                 }
 
-                return { ...profileData[0], access_token: authRes.access_token };
+                return { ...profileData[0], access_token: token };
             },
 
             async register(data) {
-                // Standard Neon/Supabase Auth signup
-                const authRes = await this.request(`${this.AUTH_URL}/signup`, {
+                // Register via Auth endpoint (Better Auth sign-up format)
+                const authRes = await this.request(`${this.AUTH_URL}/sign-up/email`, {
                     method: 'POST',
-                    body: JSON.stringify({ email: data.gmail, password: data.password })
+                    body: JSON.stringify({ email: data.gmail, password: data.password, name: data.name })
                 });
 
+                const token = authRes.token || authRes.access_token || authRes.session?.token;
+                const userId = authRes.user?.id || 'usr_' + Date.now().toString(36);
+
+                if (!token) {
+                    throw new Error("Registration failed: Did not receive an authentication token from the provider.");
+                }
+
                 const userProfile = {
-                    id: authRes.user?.id || 'usr_' + Date.now().toString(36),
+                    id: userId,
                     name: data.name,
                     username: data.username,
                     usn: data.usn,
@@ -2160,13 +2195,17 @@
                     created_at: new Date().toISOString()
                 };
 
+                // Store in Neon DB using the newly obtained JWT Authorization Token
                 await this.request(`/users`, {
                     method: 'POST',
                     body: JSON.stringify(userProfile),
-                    headers: { 'Prefer': 'return=representation' }
+                    headers: { 
+                        'Prefer': 'return=representation',
+                        'Authorization': `Bearer ${token}` 
+                    }
                 });
 
-                return { ...userProfile, access_token: authRes.access_token };
+                return { ...userProfile, access_token: token };
             },
 
             async getUserProfile(username) {
@@ -2295,8 +2334,6 @@
             },
 
             async submitTaskFiles(userId, taskId, filesArray) {
-                // To support direct frontend submission without needing a signed storage URL structure
-                // We'll store the payload inside the JSONB 'files' column in submissions table.
                 const uploadedFiles = filesArray.map(file => ({
                     name: file.name,
                     type: file.type,
