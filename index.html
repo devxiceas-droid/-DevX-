@@ -1340,7 +1340,7 @@
         <span class="syn-str">"Startups"</span>
     <span class="syn-punc">];</span>
 
-    <span class="syn-var">ideas</span><span class="syn-punc">.</span><span class="syn-fn">forEach</span><span class="syn-punc">((</span><span class="syn-var">idea</span><span class="syn-punc">)</span> <span class="syn-kw">=&gt;</span> <span class="syn-punc">{</span>
+    <span class="syn-var">ideas</span><span class="syn-punc">.</span><span class="syn-fn">forEach</span><span class="syn-punc">((</span><span class="syn-var">idea</span><span class="syn-punc">)</span> <span class="syn-kw">&gt;</span> <span class="syn-punc">{</span>
         <span class="syn-fn">build</span><span class="syn-punc">(</span><span class="syn-var">idea</span><span class="syn-punc">);</span>
         <span class="syn-fn">deploy</span><span class="syn-punc">(</span><span class="syn-var">idea</span><span class="syn-punc">);</span>
         <span class="syn-fn">improve</span><span class="syn-punc">(</span><span class="syn-var">idea</span><span class="syn-punc">);</span>
@@ -1945,7 +1945,7 @@
     </div> <!-- END APP CONTAINER -->
 
     <!-- ==========================================
-         ROUTING & ANIMATION & NEON DB SCRIPTS
+         ROUTING & ANIMATION & SUPABASE DB SCRIPTS
          ========================================== -->
     <script>
         // CODE 1 EXTRACTED BOOT SEQUENCE & CURSOR LOGIC JS 
@@ -2059,53 +2059,138 @@
         attachHoverEvents();
 
         // ---------------------------------------------------------
-        // 1. NEON DATABASE WRAPPER (Data API + Better Auth flow)
+        // 1. SUPABASE DATABASE WRAPPER (Data API + Auth flow)
         // ---------------------------------------------------------
-        const NeonDatabase = {
-            API_URL: 'https://ep-fragrant-wind-b14go6t8.apirest.c-5.eu-central-1.aws.neon.tech/neondb/rest/v1',
-            AUTH_URL: 'https://ep-fragrant-wind-b14go6t8.neonauth.c-5.eu-central-1.aws.neon.tech/neondb/auth',
+        
+        const SUPABASE_CONFIG = {
+            SUPABASE_URL: 'https://eehoqaljeqhsatxcwoeh.supabase.co',
+            SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_q3L-AJKcgNVgRnmFLxYTPQ_E_smFDsB',
+            SUPABASE_JWKS_URL: 'https://eehoqaljeqhsatxcwoeh.supabase.co/auth/v1/.well-known/jwks.json'
+        };
+
+        const AppDatabase = {
+            API_URL: `${SUPABASE_CONFIG.SUPABASE_URL}/rest/v1`,
+            AUTH_URL: `${SUPABASE_CONFIG.SUPABASE_URL}/auth/v1`,
             
-            getHeaders() {
-                const token = localStorage.getItem('neon_token') || sessionStorage.getItem('neon_token');
-                return {
+            getHeaders(customToken = null) {
+                const token = customToken || localStorage.getItem('app_token') || sessionStorage.getItem('app_token');
+                const headers = {
                     'Content-Type': 'application/json',
-                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                    'apikey': SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY
                 };
+                if (token) headers.Authorization = `Bearer ${token}`;
+                return headers;
             },
 
             async request(endpoint, options = {}) {
                 const url = endpoint.startsWith('http') ? endpoint : `${this.API_URL}${endpoint}`;
-                try {
-                    const res = await fetch(url, { ...options, headers: { ...this.getHeaders(), ...options.headers } });
-                    if (!res.ok) {
-                        const errText = await res.text();
-                        let errMsg = `Database Error: ${res.status} - ${errText}`;
-                        try {
-                            const errObj = JSON.parse(errText);
-                            errMsg = errObj.message || errObj.error_description || errObj.error || errObj.code || errMsg;
-                        } catch (e) {
-                            // Leave as text if JSON parsing fails
-                        }
-                        throw new Error(errMsg);
+                const customToken = options.headers?.['Authorization'] ? null : options.customToken;
+                const skipAuth = options.skipAuth === true;
+                const requestOptions = { ...options };
+                delete requestOptions.customToken;
+                delete requestOptions.skipAuth;
+
+                const headers = skipAuth
+                    ? {
+                        'Content-Type': 'application/json',
+                        'apikey': SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY
                     }
+                    : { ...this.getHeaders(customToken) };
+
+                Object.assign(headers, options.headers || {});
+
+                try {
+                    const res = await fetch(url, {
+                        ...requestOptions,
+                        headers,
+                        mode: 'cors',
+                        credentials: 'omit',
+                        cache: 'no-store'
+                    });
+
+                    const responseText = res.status === 204 ? '' : await res.text();
+
+                    let errObj = null;
+                    if (responseText) {
+                        try { errObj = JSON.parse(responseText); } catch (e) {}
+                    }
+
+                    if (!res.ok) {
+                        const serverMessage =
+                            errObj?.message ||
+                            errObj?.error_description ||
+                            errObj?.msg ||
+                            errObj?.error ||
+                            errObj?.code ||
+                            `Supabase request failed with HTTP ${res.status}.`;
+
+                        let message = serverMessage;
+
+                        if (res.status === 400) {
+                            message = serverMessage;
+                        } else if (res.status === 401) {
+                            message = serverMessage || 'Authentication failed. Please check your credentials.';
+                        } else if (res.status === 403) {
+                            message = serverMessage || 'Supabase denied this request. Check the database RLS policies and your permissions.';
+                        } else if (res.status === 409) {
+                            message = serverMessage || 'This request conflicts with existing data.';
+                        } else if (res.status === 422) {
+                            message = serverMessage || 'Supabase rejected the submitted data. Please check the form values.';
+                        } else if (res.status === 429) {
+                            message = 'Too many requests. Supabase is temporarily rate-limiting requests. Please wait a few minutes before trying again.';
+                        } else if (res.status >= 500) {
+                            message = serverMessage || `Supabase is experiencing a server error (HTTP ${res.status}). Please try again later.`;
+                        }
+
+                        const err = new Error(message);
+                        err.status = res.status;
+                        err.code = errObj?.code || null;
+                        err.details = errObj?.details || null;
+                        err.hint = errObj?.hint || null;
+                        throw err;
+                    }
+
                     if (res.status === 204) return null;
-                    const text = await res.text();
-                    return text ? JSON.parse(text) : null;
+
+                    if (!responseText) return null;
+
+                    try {
+                        return JSON.parse(responseText);
+                    } catch (parseError) {
+                        const err = new Error('Supabase returned an unexpected response. Please try again.');
+                        err.status = res.status;
+                        err.cause = parseError;
+                        throw err;
+                    }
                 } catch (error) {
-                    console.warn(`[Neon API Request Failed]: ${error.message}`);
-                    throw error;
+                    if (error?.status) {
+                        console.warn(`[Supabase API ${error.status}]: ${error.message}`);
+                        throw error;
+                    }
+
+                    const networkError = new Error(
+                        'Unable to connect to Supabase. Check your internet connection, Supabase project status, and browser/network settings.'
+                    );
+                    networkError.code = 'NETWORK_ERROR';
+                    networkError.cause = error;
+                    console.error('[Supabase network error]', {
+                        url,
+                        message: error?.message || String(error)
+                    });
+                    throw networkError;
                 }
             },
 
             // --- AUTH & USERS ---
             async login(identifier, usn, password) {
-                // Login via Auth endpoint (Better Auth sign-in format)
-                const authRes = await this.request(`${this.AUTH_URL}/sign-in/email`, {
+                // Login via Auth endpoint (Supabase GoTrue sign-in format)
+                const authRes = await this.request(`${this.AUTH_URL}/token?grant_type=password`, {
                     method: 'POST',
+                    skipAuth: true,
                     body: JSON.stringify({ email: identifier, password })
                 });
 
-                const token = authRes.token || authRes.access_token || authRes.session?.token;
+                const token = authRes.access_token || authRes.session?.access_token;
                 const userId = authRes.user?.id;
 
                 if (!token) {
@@ -2113,19 +2198,23 @@
                 }
 
                 let profileData = [];
-                // Use the newly acquired token in the header to fetch user DB info
                 if (userId) {
                     profileData = await this.request(`/users?id=eq.${userId}&select=*`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
+                        customToken: token
                     }).catch(() => []);
                 } else {
                     profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
+                        customToken: token
                     }).catch(() => []);
                 }
 
                 if (!profileData || profileData.length === 0) {
-                    throw new Error("Profile registered but not synchronized in the database. Ensure database setup is correct.");
+                    const completedProfile = await this.completePendingProfile(authRes.user, token);
+                    if (completedProfile) profileData = [completedProfile];
+                }
+
+                if (!profileData || profileData.length === 0) {
+                    throw new Error("Your account is authenticated, but the DevX profile could not be synchronized. Please contact a DevX developer.");
                 }
 
                 if (usn && profileData[0].usn !== usn) {
@@ -2136,12 +2225,13 @@
             },
 
             async devLogin(identifier, password) {
-                const authRes = await this.request(`${this.AUTH_URL}/sign-in/email`, {
+                const authRes = await this.request(`${this.AUTH_URL}/token?grant_type=password`, {
                     method: 'POST',
+                    skipAuth: true,
                     body: JSON.stringify({ email: identifier, password })
                 });
 
-                const token = authRes.token || authRes.access_token || authRes.session?.token;
+                const token = authRes.access_token || authRes.session?.access_token;
                 const userId = authRes.user?.id;
                 
                 if (!token) {
@@ -2151,11 +2241,11 @@
                 let profileData = [];
                 if (userId) {
                     profileData = await this.request(`/users?id=eq.${userId}&select=*`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
+                        customToken: token
                     }).catch(() => []);
                 } else {
                     profileData = await this.request(`/users?or=(username.eq.${identifier},gmail.eq.${identifier})&select=*`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
+                        customToken: token
                     }).catch(() => []);
                 }
 
@@ -2167,17 +2257,27 @@
             },
 
             async register(data) {
-                // Register via Auth endpoint (Better Auth sign-up format)
-                const authRes = await this.request(`${this.AUTH_URL}/sign-up/email`, {
+                const authRes = await this.request(`${this.AUTH_URL}/signup`, {
                     method: 'POST',
-                    body: JSON.stringify({ email: data.gmail, password: data.password, name: data.name })
+                    skipAuth: true,
+                    body: JSON.stringify({
+                        email: data.gmail,
+                        password: data.password,
+                        data: {
+                            name: data.name,
+                            username: data.username,
+                            usn: data.usn,
+                            phone: data.phone
+                        }
+                    })
                 });
 
-                const token = authRes.token || authRes.access_token || authRes.session?.token;
-                const userId = authRes.user?.id || 'usr_' + Date.now().toString(36);
+                const user = authRes?.user || null;
+                const token = authRes?.session?.access_token || authRes?.access_token || null;
+                const userId = user?.id || null;
 
-                if (!token) {
-                    throw new Error("Registration failed: Did not receive an authentication token from the provider.");
+                if (!userId) {
+                    throw new Error('Registration failed: Supabase did not return a user.');
                 }
 
                 const userProfile = {
@@ -2195,17 +2295,94 @@
                     created_at: new Date().toISOString()
                 };
 
-                // Store in Neon DB using the newly obtained JWT Authorization Token
-                await this.request(`/users`, {
-                    method: 'POST',
-                    body: JSON.stringify(userProfile),
-                    headers: { 
-                        'Prefer': 'return=representation',
-                        'Authorization': `Bearer ${token}` 
-                    }
+                // With email confirmation enabled Supabase can return a user without a session.
+                // Keep only non-sensitive profile data locally so it can be created after the user
+                // verifies the email and logs in. Never store the password or a null token.
+                if (!token) {
+                    localStorage.setItem(`devx_pending_profile_${data.gmail.toLowerCase()}`, JSON.stringify(userProfile));
+                    return {
+                        ...userProfile,
+                        requiresEmailVerification: true
+                    };
+                }
+
+                // A valid user session exists, so RLS can authorize the profile insert/update.
+                await this.upsertUserProfile(userProfile, token);
+                return { ...userProfile, access_token: token };
+            },
+
+            async upsertUserProfile(userProfile, accessToken) {
+                if (!accessToken || !userProfile?.id) {
+                    throw new Error('Cannot synchronize the profile without an authenticated Supabase session.');
+                }
+
+                const existing = await this.request(`/users?id=eq.${encodeURIComponent(userProfile.id)}&select=*`, {
+                    customToken: accessToken
                 });
 
-                return { ...userProfile, access_token: token };
+                if (Array.isArray(existing) && existing.length > 0) {
+                    const result = await this.request(`/users?id=eq.${encodeURIComponent(userProfile.id)}`, {
+                        method: 'PATCH',
+                        body: JSON.stringify({
+                            name: userProfile.name,
+                            username: userProfile.username,
+                            usn: userProfile.usn,
+                            phone: userProfile.phone,
+                            gmail: userProfile.gmail
+                        }),
+                        customToken: accessToken,
+                        headers: { 'Prefer': 'return=representation' }
+                    });
+                    return Array.isArray(result) && result.length ? result[0] : { ...existing[0], ...userProfile };
+                }
+
+                const result = await this.request(`/users`, {
+                    method: 'POST',
+                    body: JSON.stringify(userProfile),
+                    customToken: accessToken,
+                    headers: { 'Prefer': 'return=representation' }
+                });
+                return Array.isArray(result) && result.length ? result[0] : userProfile;
+            },
+
+            async completePendingProfile(authUser, accessToken) {
+                if (!authUser?.id || !accessToken) return null;
+
+                const existing = await this.request(`/users?id=eq.${encodeURIComponent(authUser.id)}&select=*`, {
+                    customToken: accessToken
+                }).catch(() => []);
+                if (Array.isArray(existing) && existing.length) {
+                    const pendingKey = `devx_pending_profile_${(authUser.email || '').toLowerCase()}`;
+                    localStorage.removeItem(pendingKey);
+                    return existing[0];
+                }
+
+                const pendingKey = `devx_pending_profile_${(authUser.email || '').toLowerCase()}`;
+                let pending = null;
+                try {
+                    const raw = localStorage.getItem(pendingKey);
+                    pending = raw ? JSON.parse(raw) : null;
+                } catch (e) {}
+
+                const metadata = authUser.user_metadata || {};
+                const profile = pending || {
+                    id: authUser.id,
+                    name: metadata.name || authUser.email?.split('@')[0] || 'DevX Member',
+                    username: metadata.username || '',
+                    usn: metadata.usn || '',
+                    phone: metadata.phone || '',
+                    gmail: authUser.email || '',
+                    role: 'user',
+                    team: 'Unassigned',
+                    devxRole: 'Member',
+                    bio: '',
+                    avatar_url: '',
+                    created_at: new Date().toISOString()
+                };
+
+                const saved = await this.upsertUserProfile({ ...profile, id: authUser.id, gmail: authUser.email || profile.gmail }, accessToken);
+                localStorage.removeItem(pendingKey);
+                return saved;
             },
 
             async getUserProfile(username) {
@@ -2228,12 +2405,14 @@
             },
 
             async updateProfile(userId, data) {
-                const res = await this.request(`/users?id=eq.${userId}`, {
+                const token = localStorage.getItem('app_token') || sessionStorage.getItem('app_token');
+                const res = await this.request(`/users?id=eq.${encodeURIComponent(userId)}`, {
                     method: 'PATCH',
                     body: JSON.stringify({ name: data.name, bio: data.bio, avatar_url: data.avatar_url }),
+                    customToken: token,
                     headers: { 'Prefer': 'return=representation' }
                 });
-                return res[0];
+                return res[0] ? { ...res[0], access_token: token } : null;
             },
 
             async adminUpdateUser(adminId, targetId, updates) {
@@ -2603,14 +2782,14 @@
                 e.submitter.textContent = "Loading...";
                 e.submitter.disabled = true;
 
-                currentUser = await NeonDatabase.login(identifier, usn, password);
+                currentUser = await AppDatabase.login(identifier, usn, password);
                 
                 if (rememberMe) {
                     localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-                    localStorage.setItem('neon_token', currentUser.access_token);
+                    localStorage.setItem('app_token', currentUser.access_token);
                 } else {
                     sessionStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-                    sessionStorage.setItem('neon_token', currentUser.access_token);
+                    sessionStorage.setItem('app_token', currentUser.access_token);
                 }
                 
                 updateNavbarState();
@@ -2634,9 +2813,9 @@
             const password = document.getElementById('dev-login-password').value;
 
             try {
-                currentUser = await NeonDatabase.devLogin(identifier, password);
+                currentUser = await AppDatabase.devLogin(identifier, password);
                 sessionStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-                sessionStorage.setItem('neon_token', currentUser.access_token);
+                sessionStorage.setItem('app_token', currentUser.access_token);
                 updateNavbarState();
                 document.getElementById('dev-login-form').reset();
                 closeAuthModal();
@@ -2662,10 +2841,26 @@
                 e.submitter.textContent = "Loading...";
                 e.submitter.disabled = true;
 
-                currentUser = await NeonDatabase.register({ name, username, usn, phone, gmail, password });
-                
+                currentUser = await AppDatabase.register({ name, username, usn, phone, gmail, password });
+
+                if (currentUser.requiresEmailVerification || !currentUser.access_token) {
+                    currentUser = null;
+                    localStorage.removeItem('app_token');
+                    sessionStorage.removeItem('app_token');
+                    updateNavbarState();
+                    document.getElementById('register-form').reset();
+                    e.submitter.textContent = oldBtnText;
+                    e.submitter.disabled = false;
+                    showError('register-global-error', 'Account created successfully. Please check your email and verify your account before logging in.');
+                    return;
+                }
+
                 localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-                localStorage.setItem('neon_token', currentUser.access_token);
+                if (currentUser.access_token) {
+                    localStorage.setItem('app_token', currentUser.access_token);
+                } else {
+                    localStorage.removeItem('app_token');
+                }
                 
                 updateNavbarState();
                 document.getElementById('register-form').reset();
@@ -2681,14 +2876,31 @@
             }
         });
 
-        logoutBtn.addEventListener('click', () => {
+        logoutBtn.addEventListener('click', async () => {
+            const token = localStorage.getItem('app_token') || sessionStorage.getItem('app_token');
             currentUser = null;
             localStorage.removeItem(SESSION_KEY);
-            localStorage.removeItem('neon_token');
+            localStorage.removeItem('app_token');
             sessionStorage.removeItem(SESSION_KEY);
-            sessionStorage.removeItem('neon_token');
+            sessionStorage.removeItem('app_token');
             updateNavbarState();
             navProfile.classList.remove('active');
+
+            if (token) {
+                try {
+                    await fetch(`${SUPABASE_CONFIG.AUTH_URL}/logout`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'apikey': SUPABASE_CONFIG.SUPABASE_PUBLISHABLE_KEY,
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                } catch (error) {
+                    console.warn('[Supabase logout failed]:', error.message);
+                }
+            }
+
             if(window.location.hash === '#profile' || window.location.hash === '#developers' || window.location.hash === '#tasks' || window.location.hash.startsWith('#task/')) {
                 window.location.hash = '#home';
             }
@@ -2735,7 +2947,7 @@
         async function renderSearch(query = '') {
             const container = document.getElementById('search-results');
             container.innerHTML = '<div style="color:var(--text-muted);">Searching...</div>';
-            const users = await NeonDatabase.getAllUsers(query);
+            const users = await AppDatabase.getAllUsers(query);
             
             if(users.length === 0) {
                 container.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;"><h3>No developers found.</h3><p>Try searching a different name or @username.</p></div>';
@@ -2761,14 +2973,14 @@
             container.innerHTML = '<div style="text-align:center; padding: 40px;">Loading profile...</div>';
 
             const isOwnProfile = !targetUsername || (currentUser && currentUser.username === targetUsername);
-            const user = isOwnProfile ? currentUser : await NeonDatabase.getUserProfile(targetUsername);
+            const user = isOwnProfile ? currentUser : await AppDatabase.getUserProfile(targetUsername);
 
             if (!user) {
                 container.innerHTML = '<div class="empty-state"><h3>Profile not found</h3></div>';
                 return;
             }
 
-            const projects = await NeonDatabase.getProjects(user.id);
+            const projects = await AppDatabase.getProjects(user.id);
             const isDevAdmin = (currentUser && currentUser.role === 'developer');
 
             let html = `
@@ -2858,7 +3070,7 @@
                 document.getElementById('edit-profile-form').addEventListener('submit', async (e) => {
                     e.preventDefault();
                     const updates = { name: document.getElementById('edit-name').value, bio: document.getElementById('edit-bio').value, avatar_url: document.getElementById('edit-pfp').value };
-                    currentUser = await NeonDatabase.updateProfile(currentUser.id, updates);
+                    currentUser = await AppDatabase.updateProfile(currentUser.id, updates);
                     localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
                     updateNavbarState();
                     renderProfile();
@@ -2903,7 +3115,7 @@
                 live_url: document.getElementById('proj-live').value,
                 image_url: document.getElementById('proj-img').value
             };
-            await NeonDatabase.saveProject(currentUser.id, data);
+            await AppDatabase.saveProject(currentUser.id, data);
             closeAuthModal();
             let hash = window.location.hash.substring(1);
             let params = hash.startsWith('user/') ? hash.split('/')[1] : null;
@@ -2912,7 +3124,7 @@
 
         window.deleteProject = async (projId, projectOwnerId, bypassRoleCheck = false) => {
             if(confirm("Are you sure you want to delete this project?")) {
-                await NeonDatabase.deleteProject(projectOwnerId, projId, bypassRoleCheck);
+                await AppDatabase.deleteProject(projectOwnerId, projId, bypassRoleCheck);
                 let hash = window.location.hash.substring(1);
                 let params = hash.startsWith('user/') ? hash.split('/')[1] : null;
                 renderProfile(params);
@@ -2940,8 +3152,8 @@
 
             container.innerHTML = '<div style="color:var(--text-muted); text-align:center;">Loading team data...</div>';
 
-            const allUsers = await NeonDatabase.getAllUsers();
-            const allTasks = await NeonDatabase.getAllTasks();
+            const allUsers = await AppDatabase.getAllUsers();
+            const allTasks = await AppDatabase.getAllTasks();
 
             const teamMembers = allUsers.filter(u => u.team === teamData.name && u.role !== 'developer');
             const teamTasks = allTasks.filter(t => t.team === teamData.name || t.team === 'All Teams');
@@ -3019,7 +3231,7 @@
         async function renderStudentTasks() {
             const list = document.getElementById('student-tasks-list');
             list.innerHTML = '<div style="color:var(--text-muted); grid-column:1/-1;">Loading tasks...</div>';
-            const tasks = await NeonDatabase.getTasksForUser(currentUser);
+            const tasks = await AppDatabase.getTasksForUser(currentUser);
             
             if(tasks.length === 0) {
                 list.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><h3>No tasks assigned</h3><p>You currently have no pending tasks from DevX Admin.</p></div>';
@@ -3064,13 +3276,13 @@
             const container = document.getElementById('task-detail-target');
             container.innerHTML = '<div style="color:var(--text-muted);">Loading task...</div>';
             
-            const task = await NeonDatabase.getTaskById(taskId);
+            const task = await AppDatabase.getTaskById(taskId);
             if(!task) {
                 container.innerHTML = '<div class="empty-state"><h3>Task not found</h3></div>';
                 return;
             }
 
-            const sub = await NeonDatabase.getSubmission(currentUser.id, task.id);
+            const sub = await AppDatabase.getSubmission(currentUser.id, task.id);
             let status = sub ? sub.status : 'Not Started';
             if (!sub && new Date(task.deadline).getTime() < Date.now()) status = 'Overdue';
 
@@ -3197,7 +3409,7 @@
             document.querySelector('#task-detail-target .btn-primary').textContent = 'Submitting...';
             
             try {
-                await NeonDatabase.submitTaskFiles(currentUser.id, taskId, stagedFiles);
+                await AppDatabase.submitTaskFiles(currentUser.id, taskId, stagedFiles);
                 renderTaskDetail(taskId);
             } catch(e) {
                 alert("Submission failed. (API or Storage constraint)");
@@ -3218,7 +3430,7 @@
             if(tabId === 'admin-tasks-tab') renderAdminTasks();
             if(tabId === 'admin-subs-tab') renderAdminSubmissions();
             if(tabId === 'admin-settings-tab') {
-                NeonDatabase.getAnnouncement().then(text => {
+                AppDatabase.getAnnouncement().then(text => {
                     document.getElementById('admin-announcement-text').value = text;
                 });
             }
@@ -3230,7 +3442,7 @@
                 return;
             }
             if(confirm("Are you sure you want to permanently delete this user?")) {
-                await NeonDatabase.adminDeleteUser(currentUser.id, targetId);
+                await AppDatabase.adminDeleteUser(currentUser.id, targetId);
                 renderDevelopers();
             }
         };
@@ -3243,7 +3455,7 @@
             if (existingAlert) existingAlert.remove();
 
             tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">Loading Developers...</td></tr>';
-            const users = await NeonDatabase.getAllUsers();
+            const users = await AppDatabase.getAllUsers();
             
             const oneDay = 24 * 60 * 60 * 1000;
             const recentUsers = users.filter(u => u.role !== 'developer' && u.created_at && (Date.now() - new Date(u.created_at).getTime()) < oneDay);
@@ -3309,7 +3521,7 @@
             const team = document.getElementById('admin-manage-team').value;
             const devxRole = document.getElementById('admin-manage-devxrole').value;
             const role = document.getElementById('admin-manage-role').value;
-            await NeonDatabase.adminUpdateUser(currentUser.id, id, { team, devxRole, role });
+            await AppDatabase.adminUpdateUser(currentUser.id, id, { team, devxRole, role });
             closeAuthModal();
             renderDevelopers();
         });
@@ -3318,7 +3530,7 @@
         async function renderAdminTasks() {
             const tbody = document.getElementById('admin-task-list');
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading Tasks...</td></tr>';
-            const tasks = await NeonDatabase.getAllTasks();
+            const tasks = await AppDatabase.getAllTasks();
             
             if(tasks.length===0) {
                 tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:32px;">No tasks created yet.</td></tr>';
@@ -3350,7 +3562,7 @@
             document.getElementById('admin-task-form').style.display = 'block';
             
             // Populate Multi-select specific students
-            const users = await NeonDatabase.getAllUsers();
+            const users = await AppDatabase.getAllUsers();
             const studentList = document.getElementById('task-students');
             studentList.innerHTML = users.filter(u=>u.role !== 'developer').map(u => `
                 <label class="multiselect-item hover-target">
@@ -3380,7 +3592,7 @@
                 specificStudents: selectedStudents
             };
 
-            await NeonDatabase.createTask(currentUser.id, data);
+            await AppDatabase.createTask(currentUser.id, data);
             closeAuthModal();
             renderAdminTasks();
         });
@@ -3390,9 +3602,9 @@
             const list = document.getElementById('admin-subs-list');
             list.innerHTML = '<div style="color:var(--text-muted);">Loading Tracking Data...</div>';
             
-            const tasks = await NeonDatabase.getAllTasks();
-            const users = await NeonDatabase.getAllUsers();
-            const submissions = await NeonDatabase.getAllSubmissions();
+            const tasks = await AppDatabase.getAllTasks();
+            const users = await AppDatabase.getAllUsers();
+            const submissions = await AppDatabase.getAllSubmissions();
             
             if(tasks.length===0) { list.innerHTML = '<div class="empty-state"><h3>No tasks exist</h3></div>'; return; }
 
@@ -3490,7 +3702,7 @@
 
         window.updateSubmissionState = async (status) => {
             const feedback = document.getElementById('admin-sub-feedback').value;
-            await NeonDatabase.updateSubmissionStatus(currentReviewSubId, status, feedback);
+            await AppDatabase.updateSubmissionStatus(currentReviewSubId, status, feedback);
             closeAuthModal();
             renderAdminSubmissions();
         };
@@ -3500,7 +3712,7 @@
             e.preventDefault();
             const newText = document.getElementById('admin-announcement-text').value;
             try {
-                await NeonDatabase.updateAnnouncement(currentUser.id, newText);
+                await AppDatabase.updateAnnouncement(currentUser.id, newText);
                 document.getElementById('dynamic-announcement').textContent = newText;
                 alert("Announcement successfully updated!");
             } catch (err) {
@@ -3511,8 +3723,8 @@
         // =========================================================
         // INIT APPLICATION
         // =========================================================
-        NeonDatabase.init().then(() => {
-            NeonDatabase.getAnnouncement().then(text => {
+        AppDatabase.init().then(() => {
+            AppDatabase.getAnnouncement().then(text => {
                 document.getElementById('dynamic-announcement').textContent = text;
             });
 
